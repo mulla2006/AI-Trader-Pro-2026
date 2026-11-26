@@ -1,1 +1,1 @@
-# AI-Trader-Pro-2026
+# AI-Trader-Pro-2020
