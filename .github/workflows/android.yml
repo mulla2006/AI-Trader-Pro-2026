@@ -22,13 +22,21 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Install Android SDK
+      - name:android-actions/setup-android@v3
         uses: android-actions/setup-android@v3
 
       - name: Install Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: '8.9'
+          
+      - name: Install Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: |
+            platform-tools
+            platforms;android-35
+            build-tools;35.0.0
+gradle-version: '8.9'
 
       - name: Build Debug APK
         run: gradle assembleDebug
