@@ -4,6 +4,8 @@ import android.app.Activity;
 import android.content.SharedPreferences;
 import android.graphics.Color;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.view.Gravity;
 import android.view.View;
 import android.widget.Button;
@@ -13,13 +15,22 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 import java.util.Locale;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import org.json.JSONObject;
 
 public class MainActivity extends Activity {
     private static final double START_BALANCE = 100.0;
     private static final double MAX_RISK = 0.005;
     private static final double MAX_LEVERAGE = 2.0;
     private SharedPreferences prefs;
-    private TextView balanceView, riskView, positionView, resultView, signalView;
+    private TextView balanceView, riskView, positionView, resultView, signalView, livePriceView;
+    private final Handler priceHandler = new Handler(Looper.getMainLooper());
+    private volatile boolean activityActive = true;
+    private static final long PRICE_REFRESH_MS = 60000L;
+    private final Runnable priceRefreshTask = new Runnable() { public void run() { if (activityActive) { fetchLiveGoldPrice(); priceHandler.postDelayed(this, PRICE_REFRESH_MS); } } };
     private EditText entryInput, stopInput, targetInput, exitInput;
     private EditText currentPriceInput, h1FastInput, h1SlowInput, m15FastInput, m15SlowInput, rsiInput, atrInput;
     private boolean hasPosition, isLong;
@@ -79,8 +90,16 @@ public class MainActivity extends Activity {
         root.addView(riskView);
 
         addGap(root, 20);
+        root.addView(text("LIVE XAU/USD SPOT PRICE", 18, Color.WHITE, true));
+        livePriceView = text("Connecting to free public price feed…", 16, Color.rgb(0, 220, 160), true);
+        root.addView(livePriceView);
+        Button refreshPriceButton = button("REFRESH LIVE PRICE");
+        root.addView(refreshPriceButton);
+        refreshPriceButton.setOnClickListener(v -> fetchLiveGoldPrice());
+        root.addView(text("Source: XAUS public spot feed • refreshes every 60 seconds • indicative spot price, not an Exness quote. Stale or unavailable data is clearly flagged.", 12, Color.LTGRAY, false));
+
         root.addView(text("XAUUSD SIGNAL ANALYSIS", 18, Color.WHITE, true));
-        root.addView(text("Enter the indicator values shown on your MT5 charts. Use the same symbol and current market session. This version does not fetch live prices.", 12, Color.LTGRAY, false));
+        root.addView(text("Live spot price fills the price field. EMA and RSI values still need to be read from MT5; ATR must be checked against your MT5 chart. This app does not receive MT5 candles.", 12, Color.LTGRAY, false));
         currentPriceInput = field("Current XAUUSD price");
         h1FastInput = field("H1 EMA 20");
         h1SlowInput = field("H1 EMA 50");
@@ -141,8 +160,68 @@ public class MainActivity extends Activity {
         resetButton.setOnClickListener(v -> resetAccount());
 
         addGap(root, 16);
-        root.addView(text("Safety: demo simulation only • maximum planned risk 0.5% • simulated leverage cap 2x. Signals are rule-based indicator checks, not a trained AI model or financial advice. No live feed, MT5 connection, broker order, automatic stop/target, fees or slippage. XAUUSD contract sizing must be verified in MT5 before any real use.", 12, Color.LTGRAY, false));
+        root.addView(text("Safety: demo simulation only • maximum planned risk 0.5% • simulated leverage cap 2x. Live public spot price is indicative and may differ from Exness. EMA/RSI/ATR analysis remains dependent on manual MT5 readings. Signals are rule-based checks, not a trained AI model or financial advice. No MT5 connection, broker order, automatic stop/target, fees or slippage. Position size is generic units, not MT5 lots.", 12, Color.LTGRAY, false));
         setContentView(scroll);
+        priceHandler.post(priceRefreshTask);
+    }
+
+
+    private void fetchLiveGoldPrice() {
+        if (livePriceView != null) livePriceView.setText("Updating public XAU/USD spot price…");
+        new Thread(() -> {
+            HttpURLConnection connection = null;
+            try {
+                URL url = new URL("https://xaus.com/api/v1/spot?compact=1");
+                connection = (HttpURLConnection) url.openConnection();
+                connection.setRequestMethod("GET");
+                connection.setConnectTimeout(10000);
+                connection.setReadTimeout(10000);
+                connection.setRequestProperty("Accept", "application/json");
+                int code = connection.getResponseCode();
+                if (code != 200) throw new Exception("Feed HTTP " + code);
+                BufferedReader reader = new BufferedReader(new InputStreamReader(connection.getInputStream(), "UTF-8"));
+                StringBuilder body = new StringBuilder();
+                String line;
+                while ((line = reader.readLine()) != null) body.append(line);
+                reader.close();
+                JSONObject json = new JSONObject(body.toString());
+                double spot = json.optDouble("spot_usd_oz", Double.NaN);
+                if (Double.isNaN(spot)) {
+                    JSONObject xau = json.optJSONObject("xau");
+                    if (xau != null) spot = xau.optDouble("price", Double.NaN);
+                }
+                if (!valid(spot)) throw new Exception("Price field missing or invalid");
+                JSONObject state = json.optJSONObject("data_state");
+                String status = state == null ? "unknown" : state.optString("status", "unknown");
+                String timestamp = json.optString("updated_at", "");
+                if (timestamp.isEmpty() && state != null) timestamp = state.optString("as_of", "");
+                final double finalSpot = spot;
+                final String finalStatus = status;
+                final String finalTimestamp = timestamp;
+                runOnUiThread(() -> {
+                    if (!activityActive) return;
+                    currentPriceInput.setText(price(finalSpot));
+                    String label = "fresh".equalsIgnoreCase(finalStatus) ? "FRESH" :
+                        ("stale".equalsIgnoreCase(finalStatus) ? "STALE — DO NOT RELY ON THIS PRICE" : "FRESHNESS UNCONFIRMED");
+                    livePriceView.setText("XAU/USD: $" + String.format(Locale.US, "%.2f", finalSpot) +
+                        "\nFeed status: " + label + (finalTimestamp.isEmpty() ? "" : "\nUpdated: " + finalTimestamp));
+                });
+            } catch (Exception ex) {
+                runOnUiThread(() -> {
+                    if (activityActive && livePriceView != null)
+                        livePriceView.setText("LIVE PRICE UNAVAILABLE — " + ex.getMessage() + "\nDo not use an old price as a live quote.");
+                });
+            } finally {
+                if (connection != null) connection.disconnect();
+            }
+        }).start();
+    }
+
+    @Override
+    protected void onDestroy() {
+        activityActive = false;
+        priceHandler.removeCallbacks(priceRefreshTask);
+        super.onDestroy();
     }
 
     private void analyzeSignal() {
