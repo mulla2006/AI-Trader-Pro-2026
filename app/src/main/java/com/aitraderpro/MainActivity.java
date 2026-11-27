@@ -20,17 +20,19 @@ import java.net.URL;
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import org.json.JSONObject;
+import org.json.JSONArray;
+import java.util.ArrayList;
 
 public class MainActivity extends Activity {
     private static final double START_BALANCE = 100.0;
     private static final double MAX_RISK = 0.005;
     private static final double MAX_LEVERAGE = 2.0;
     private SharedPreferences prefs;
-    private TextView balanceView, riskView, positionView, resultView, signalView, livePriceView;
+    private TextView balanceView, riskView, positionView, resultView, signalView, livePriceView, marketAnalysisView;
     private final Handler priceHandler = new Handler(Looper.getMainLooper());
     private volatile boolean activityActive = true;
     private static final long PRICE_REFRESH_MS = 60000L;
-    private final Runnable priceRefreshTask = new Runnable() { public void run() { if (activityActive) { fetchLiveGoldPrice(); priceHandler.postDelayed(this, PRICE_REFRESH_MS); } } };
+    private final Runnable priceRefreshTask = new Runnable() { public void run() { if (activityActive) { fetchLiveGoldPrice(); fetchAutomaticMarketAnalysis(); priceHandler.postDelayed(this, PRICE_REFRESH_MS); } } };
     private EditText entryInput, stopInput, targetInput, exitInput;
     private EditText currentPriceInput, h1FastInput, h1SlowInput, m15FastInput, m15SlowInput, rsiInput, atrInput;
     private boolean hasPosition, isLong;
@@ -98,8 +100,15 @@ public class MainActivity extends Activity {
         refreshPriceButton.setOnClickListener(v -> fetchLiveGoldPrice());
         root.addView(text("Source: XAUS public spot feed • refreshes every 60 seconds • indicative spot price, not an Exness quote. Stale or unavailable data is clearly flagged.", 12, Color.LTGRAY, false));
 
-        root.addView(text("XAUUSD SIGNAL ANALYSIS", 18, Color.WHITE, true));
-        root.addView(text("Live spot price fills the price field. EMA and RSI values still need to be read from MT5; ATR must be checked against your MT5 chart. This app does not receive MT5 candles.", 12, Color.LTGRAY, false));
+        root.addView(text("AUTOMATIC XAUUSD MARKET ANALYSIS", 18, Color.WHITE, true));
+        marketAnalysisView = text("Waiting for M15 and H1 candle data…", 14, Color.WHITE, false);
+        root.addView(marketAnalysisView);
+        Button autoRefreshButton = button("REFRESH MARKET ANALYSIS");
+        root.addView(autoRefreshButton);
+        autoRefreshButton.setOnClickListener(v -> fetchAutomaticMarketAnalysis());
+        root.addView(text("Automatic analysis uses public XAUUSD M15/H1 candles. Indicators are calculated inside the app from closed candles. Feed prices may differ from Exness.", 12, Color.LTGRAY, false));
+        root.addView(text("SIGNAL DETAILS", 18, Color.WHITE, true));
+        root.addView(text("The app fills these values automatically from the public candle feed. They are reference data, not Exness executable prices.", 12, Color.LTGRAY, false));
         currentPriceInput = field("Current XAUUSD price");
         h1FastInput = field("H1 EMA 20");
         h1SlowInput = field("H1 EMA 50");
@@ -116,7 +125,7 @@ public class MainActivity extends Activity {
         root.addView(atrInput);
         Button analyzeButton = button("ANALYSE XAUUSD");
         root.addView(analyzeButton);
-        signalView = text("No signal analysed yet. Enter your MT5 indicator values above.", 14, Color.WHITE, false);
+        signalView = text("Waiting for automatic M15/H1 candle analysis.", 14, Color.WHITE, false);
         root.addView(signalView);
         Button loadSignalButton = button("LOAD SIGNAL INTO PAPER TRADE");
         root.addView(loadSignalButton);
@@ -160,7 +169,7 @@ public class MainActivity extends Activity {
         resetButton.setOnClickListener(v -> resetAccount());
 
         addGap(root, 16);
-        root.addView(text("Safety: demo simulation only • maximum planned risk 0.5% • simulated leverage cap 2x. Live public spot price is indicative and may differ from Exness. EMA/RSI/ATR analysis remains dependent on manual MT5 readings. Signals are rule-based checks, not a trained AI model or financial advice. No MT5 connection, broker order, automatic stop/target, fees or slippage. Position size is generic units, not MT5 lots.", 12, Color.LTGRAY, false));
+        root.addView(text("Safety: demo simulation only • maximum planned risk 0.5% • simulated leverage cap 2x. Public candle and spot feeds are indicative and may differ from Exness. Analysis is an automated indicator-based strategy, not a trained AI model or financial advice. No MT5 connection or broker orders. Position size is generic units, not MT5 lots.", 12, Color.LTGRAY, false));
         setContentView(scroll);
         priceHandler.post(priceRefreshTask);
     }
@@ -222,6 +231,121 @@ public class MainActivity extends Activity {
         activityActive = false;
         priceHandler.removeCallbacks(priceRefreshTask);
         super.onDestroy();
+    }
+
+
+    private static class Candle {
+        double open, high, low, close;
+        Candle(double o, double h, double l, double c) { open=o; high=h; low=l; close=c; }
+    }
+
+    private JSONObject getJson(String address) throws Exception {
+        HttpURLConnection connection = null;
+        try {
+            connection = (HttpURLConnection) new URL(address).openConnection();
+            connection.setRequestMethod("GET");
+            connection.setConnectTimeout(12000);
+            connection.setReadTimeout(12000);
+            connection.setRequestProperty("Accept", "application/json");
+            int code = connection.getResponseCode();
+            if (code != 200) throw new Exception("HTTP " + code + " from market-data feed");
+            BufferedReader reader = new BufferedReader(new InputStreamReader(connection.getInputStream(), "UTF-8"));
+            StringBuilder body = new StringBuilder();
+            String line;
+            while ((line = reader.readLine()) != null) body.append(line);
+            reader.close();
+            return new JSONObject(body.toString());
+        } finally {
+            if (connection != null) connection.disconnect();
+        }
+    }
+
+    private ArrayList<Candle> getClosedCandles(String timeframe) throws Exception {
+        JSONObject json = getJson("https://biquote.io/api/XAUUSD/ohlc?interval=" + timeframe + "&limit=100");
+        JSONArray bars = json.optJSONArray("bars");
+        if (bars == null) throw new Exception(timeframe + " candle list missing");
+        ArrayList<Candle> candles = new ArrayList<>();
+        // Provider returns newest first. Insert at the front to restore oldest-first order.
+        for (int i=0; i<bars.length(); i++) {
+            JSONObject b = bars.optJSONObject(i);
+            if (b == null || b.optBoolean("isOpen", false)) continue;
+            double o=b.optDouble("open", Double.NaN), h=b.optDouble("high", Double.NaN);
+            double l=b.optDouble("low", Double.NaN), cl=b.optDouble("close", Double.NaN);
+            if (valid(o) && valid(h) && valid(l) && valid(cl) && h >= l) {
+                candles.add(0, new Candle(o,h,l,cl));
+            }
+        }
+        if (candles.size() < 55) throw new Exception("Not enough closed " + timeframe + " candles (" + candles.size() + ")");
+        return candles;
+    }
+
+    private double ema(ArrayList<Candle> bars, int period) {
+        double value=0;
+        for (int i=0; i<period; i++) value += bars.get(i).close;
+        value /= period;
+        double k=2.0/(period+1.0);
+        for (int i=period; i<bars.size(); i++) value = bars.get(i).close*k + value*(1.0-k);
+        return value;
+    }
+
+    private double rsi(ArrayList<Candle> bars, int period) {
+        double gains=0, losses=0;
+        int start=bars.size()-period;
+        for (int i=start; i<bars.size(); i++) {
+            double change=bars.get(i).close-bars.get(i-1).close;
+            if (change>0) gains+=change; else losses-=change;
+        }
+        double avgGain=gains/period, avgLoss=losses/period;
+        if (avgLoss==0) return avgGain==0 ? 50 : 100;
+        double rs=avgGain/avgLoss;
+        return 100.0-(100.0/(1.0+rs));
+    }
+
+    private double atr(ArrayList<Candle> bars, int period) {
+        double sum=0;
+        int start=bars.size()-period;
+        for (int i=start; i<bars.size(); i++) {
+            Candle b=bars.get(i), prev=bars.get(i-1);
+            double tr=Math.max(b.high-b.low, Math.max(Math.abs(b.high-prev.close), Math.abs(b.low-prev.close)));
+            sum+=tr;
+        }
+        return sum/period;
+    }
+
+    private void fetchAutomaticMarketAnalysis() {
+        if (marketAnalysisView != null) marketAnalysisView.setText("Downloading closed M15 and H1 candles…");
+        new Thread(() -> {
+            try {
+                ArrayList<Candle> m15=getClosedCandles("15m");
+                ArrayList<Candle> h1=getClosedCandles("1h");
+                double price=m15.get(m15.size()-1).close;
+                double h1e20=ema(h1,20), h1e50=ema(h1,50);
+                double m15e20=ema(m15,20), m15e50=ema(m15,50);
+                double rsi14=rsi(m15,14), atr14=atr(m15,14);
+                runOnUiThread(() -> {
+                    if (!activityActive) return;
+                    currentPriceInput.setText(price(price));
+                    h1FastInput.setText(price(h1e20)); h1SlowInput.setText(price(h1e50));
+                    m15FastInput.setText(price(m15e20)); m15SlowInput.setText(price(m15e50));
+                    rsiInput.setText(String.format(Locale.US,"%.2f",rsi14));
+                    atrInput.setText(price(atr14));
+                    marketAnalysisView.setText("DATA: M15 + H1 CLOSED CANDLES RECEIVED\n" +
+                        "Latest M15 close: " + price(price) +
+                        "\nH1 EMA 20 / 50: " + price(h1e20) + " / " + price(h1e50) +
+                        "\nM15 EMA 20 / 50: " + price(m15e20) + " / " + price(m15e50) +
+                        "\nM15 RSI 14: " + String.format(Locale.US,"%.2f",rsi14) +
+                        "\nM15 ATR 14: " + price(atr14) +
+                        "\nUpdated from latest closed candles. Refreshes every 60 seconds.");
+                    analyzeSignal();
+                });
+            } catch (Exception ex) {
+                runOnUiThread(() -> {
+                    if (activityActive && marketAnalysisView != null)
+                        marketAnalysisView.setText("AUTOMATIC ANALYSIS UNAVAILABLE\n" + ex.getMessage() +
+                            "\nNo signal generated. Check connection and try again.");
+                });
+            }
+        }).start();
     }
 
     private void analyzeSignal() {
