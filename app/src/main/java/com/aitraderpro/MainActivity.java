@@ -19,11 +19,13 @@ public class MainActivity extends Activity {
     private static final double MAX_RISK = 0.005;
     private static final double MAX_LEVERAGE = 2.0;
     private SharedPreferences prefs;
-    private TextView balanceView, riskView, positionView, resultView;
+    private TextView balanceView, riskView, positionView, resultView, signalView;
     private EditText entryInput, stopInput, targetInput, exitInput;
-    private boolean hasPosition;
-    private boolean isLong;
+    private EditText currentPriceInput, h1FastInput, h1SlowInput, m15FastInput, m15SlowInput, rsiInput, atrInput;
+    private boolean hasPosition, isLong;
     private double balance, entry, stop, target, quantity, riskAmount;
+    private boolean signalReady, signalIsLong;
+    private double signalEntry, signalStop, signalTarget, signalQuantity;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -46,16 +48,13 @@ public class MainActivity extends Activity {
     }
 
     private void saveState() {
-        prefs.edit()
-            .putFloat("balance", (float) balance)
-            .putBoolean("has_position", hasPosition)
-            .putBoolean("is_long", isLong)
+        prefs.edit().putFloat("balance", (float) balance)
+            .putBoolean("has_position", hasPosition).putBoolean("is_long", isLong)
             .putLong("entry", Double.doubleToLongBits(entry))
             .putLong("stop", Double.doubleToLongBits(stop))
             .putLong("target", Double.doubleToLongBits(target))
             .putLong("quantity", Double.doubleToLongBits(quantity))
-            .putLong("risk", Double.doubleToLongBits(riskAmount))
-            .apply();
+            .putLong("risk", Double.doubleToLongBits(riskAmount)).apply();
     }
 
     private void buildScreen() {
@@ -69,20 +68,46 @@ public class MainActivity extends Activity {
         TextView title = text("AI TRADER PRO", 27, Color.WHITE, true);
         title.setGravity(Gravity.CENTER);
         root.addView(title);
-        TextView subtitle = text("PAPER TRADING • SIMULATION ONLY", 13, Color.rgb(0, 220, 160), true);
+        TextView subtitle = text("GOLD SIGNAL ASSISTANT • DEMO ONLY", 13, Color.rgb(0, 220, 160), true);
         subtitle.setGravity(Gravity.CENTER);
         root.addView(subtitle);
 
         balanceView = text("", 23, Color.WHITE, true);
         riskView = text("", 15, Color.LTGRAY, false);
-        addGap(root, 18);
+        addGap(root, 14);
         root.addView(balanceView);
         root.addView(riskView);
-        addGap(root, 20);
 
-        TextView section = text("OPEN A DEMO POSITION", 17, Color.WHITE, true);
-        root.addView(section);
-        entryInput = field("Entry price (example: 60000)");
+        addGap(root, 20);
+        root.addView(text("XAUUSD SIGNAL ANALYSIS", 18, Color.WHITE, true));
+        root.addView(text("Enter the indicator values shown on your MT5 charts. Use the same symbol and current market session. This version does not fetch live prices.", 12, Color.LTGRAY, false));
+        currentPriceInput = field("Current XAUUSD price");
+        h1FastInput = field("H1 EMA 20");
+        h1SlowInput = field("H1 EMA 50");
+        m15FastInput = field("M15 EMA 20");
+        m15SlowInput = field("M15 EMA 50");
+        rsiInput = field("M15 RSI 14 (0 to 100)");
+        atrInput = field("M15 ATR 14 (price units)");
+        root.addView(currentPriceInput);
+        root.addView(h1FastInput);
+        root.addView(h1SlowInput);
+        root.addView(m15FastInput);
+        root.addView(m15SlowInput);
+        root.addView(rsiInput);
+        root.addView(atrInput);
+        Button analyzeButton = button("ANALYSE XAUUSD");
+        root.addView(analyzeButton);
+        signalView = text("No signal analysed yet. Enter your MT5 indicator values above.", 14, Color.WHITE, false);
+        root.addView(signalView);
+        Button loadSignalButton = button("LOAD SIGNAL INTO PAPER TRADE");
+        root.addView(loadSignalButton);
+        analyzeButton.setOnClickListener(v -> analyzeSignal());
+        loadSignalButton.setOnClickListener(v -> loadSignal());
+
+        addGap(root, 22);
+        root.addView(text("PAPER TRADING — SIMULATION ONLY", 17, Color.rgb(0, 220, 160), true));
+        root.addView(text("Review the signal, then manually open a simulated position below. No MT5 order is sent.", 12, Color.LTGRAY, false));
+        entryInput = field("Entry price");
         stopInput = field("Stop-loss price");
         targetInput = field("Take-profit price");
         root.addView(entryInput);
@@ -111,15 +136,61 @@ public class MainActivity extends Activity {
         addGap(root, 16);
         resultView = text("", 14, Color.rgb(0, 220, 160), false);
         root.addView(resultView);
-
         Button resetButton = button("RESET DEMO ACCOUNT");
         root.addView(resetButton);
         resetButton.setOnClickListener(v -> resetAccount());
 
         addGap(root, 16);
-        TextView note = text("Rules: $100 starting balance • maximum planned risk 0.5% per trade • maximum simulated leverage 2x. Enter prices manually. No live market feed, AI signals, exchange connection, fees or slippage are included yet. This screen cannot place real orders.", 12, Color.LTGRAY, false);
-        root.addView(note);
+        root.addView(text("Safety: demo simulation only • maximum planned risk 0.5% • simulated leverage cap 2x. Signals are rule-based indicator checks, not a trained AI model or financial advice. No live feed, MT5 connection, broker order, automatic stop/target, fees or slippage. XAUUSD contract sizing must be verified in MT5 before any real use.", 12, Color.LTGRAY, false));
         setContentView(scroll);
+    }
+
+    private void analyzeSignal() {
+        double price = read(currentPriceInput), h1Fast = read(h1FastInput), h1Slow = read(h1SlowInput);
+        double m15Fast = read(m15FastInput), m15Slow = read(m15SlowInput);
+        double rsi = read(rsiInput), atr = read(atrInput);
+        if (!valid(price) || !valid(h1Fast) || !valid(h1Slow) || !valid(m15Fast) ||
+            !valid(m15Slow) || Double.isNaN(rsi) || rsi < 0 || rsi > 100 || !valid(atr)) {
+            toast("Enter positive price, EMA and ATR values, and an RSI between 0 and 100.");
+            return;
+        }
+        boolean bullish = h1Fast > h1Slow && m15Fast > m15Slow && rsi >= 50 && rsi <= 70 && price > m15Fast;
+        boolean bearish = h1Fast < h1Slow && m15Fast < m15Slow && rsi >= 30 && rsi <= 50 && price < m15Fast;
+        signalReady = false;
+        if (!bullish && !bearish) {
+            signalView.setText("SIGNAL: WAIT\nH1 and M15 trend/RSI conditions do not align. Do not force a trade.");
+            return;
+        }
+        signalIsLong = bullish;
+        signalEntry = price;
+        double distance = atr * 1.5;
+        signalStop = bullish ? price - distance : price + distance;
+        signalTarget = bullish ? price + (distance * 2.0) : price - (distance * 2.0);
+        double riskBudget = balance * MAX_RISK;
+        signalQuantity = Math.min(riskBudget / distance, (balance * MAX_LEVERAGE) / price);
+        if (!valid(signalQuantity)) {
+            signalView.setText("SIGNAL: WAIT\nPosition size could not be calculated safely.");
+            return;
+        }
+        signalReady = true;
+        signalView.setText("SIGNAL: " + (bullish ? "BUY / LONG" : "SELL / SHORT") +
+            "\nEntry reference: " + price(signalEntry) +
+            "\nStop-loss: " + price(signalStop) +
+            "\nTake-profit (2R): " + price(signalTarget) +
+            "\nEstimated size: " + String.format(Locale.US, "%.6f units (not MT5 lots)", signalQuantity) +
+            "\nPlanned stop risk: " + money(signalQuantity * distance) +
+            "\n\nManual approval required. Confirm current prices and spread in MT5 before acting.");
+    }
+
+    private void loadSignal() {
+        if (!signalReady) {
+            toast("Analyse a valid BUY or SELL signal first. WAIT cannot be loaded.");
+            return;
+        }
+        entryInput.setText(price(signalEntry));
+        stopInput.setText(price(signalStop));
+        targetInput.setText(price(signalTarget));
+        toast("Signal values loaded. Review them, then tap OPEN " + (signalIsLong ? "LONG" : "SHORT") + " for paper trading.");
     }
 
     private void openPosition(boolean longSide) {
@@ -132,10 +203,8 @@ public class MainActivity extends Activity {
         }
         double distance = Math.abs(e - s);
         riskAmount = balance * MAX_RISK;
-        double units = riskAmount / distance;
-        double maxUnits = (balance * MAX_LEVERAGE) / e;
-        quantity = Math.min(units, maxUnits);
-        if (!valid(quantity) || quantity <= 0) { toast("Position size could not be calculated."); return; }
+        quantity = Math.min(riskAmount / distance, (balance * MAX_LEVERAGE) / e);
+        if (!valid(quantity)) { toast("Position size could not be calculated."); return; }
         entry = e; stop = s; target = t; isLong = longSide; hasPosition = true;
         saveState();
         resultView.setText("Paper position opened. Estimated stop risk: " + money(quantity * distance) +
@@ -158,6 +227,7 @@ public class MainActivity extends Activity {
 
     private void resetAccount() {
         balance = START_BALANCE; hasPosition = false; entry = stop = target = quantity = riskAmount = 0;
+        signalReady = false;
         saveState();
         resultView.setText("Demo account reset to $100. No real funds were used.");
         refreshScreen();
