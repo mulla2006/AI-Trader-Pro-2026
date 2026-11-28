@@ -15,6 +15,9 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 import java.util.Locale;
+import java.text.SimpleDateFormat;
+import java.util.Date;
+import java.util.TimeZone;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.io.BufferedReader;
@@ -98,7 +101,7 @@ public class MainActivity extends Activity {
         Button refreshPriceButton = button("REFRESH LIVE PRICE");
         root.addView(refreshPriceButton);
         refreshPriceButton.setOnClickListener(v -> fetchLiveGoldPrice());
-        root.addView(text("Source: XAUS public spot feed • refreshes every 60 seconds • indicative spot price, not an Exness quote. Stale or unavailable data is clearly flagged.", 12, Color.LTGRAY, false));
+        root.addView(text("Source: Gold-API public XAU spot feed • refreshes every 60 seconds • indicative spot price, not an Exness quote. Timestamp is checked for freshness.", 12, Color.LTGRAY, false));
 
         root.addView(text("AUTOMATIC XAUUSD MARKET ANALYSIS", 18, Color.WHITE, true));
         marketAnalysisView = text("Waiting for M15 and H1 candle data…", 14, Color.WHITE, false);
@@ -180,40 +183,44 @@ public class MainActivity extends Activity {
         new Thread(() -> {
             HttpURLConnection connection = null;
             try {
-                URL url = new URL("https://xaus.com/api/v1/spot?compact=1");
+                URL url = new URL("https://api.gold-api.com/price/XAU");
                 connection = (HttpURLConnection) url.openConnection();
                 connection.setRequestMethod("GET");
-                connection.setConnectTimeout(10000);
-                connection.setReadTimeout(10000);
+                connection.setConnectTimeout(12000);
+                connection.setReadTimeout(12000);
                 connection.setRequestProperty("Accept", "application/json");
                 int code = connection.getResponseCode();
-                if (code != 200) throw new Exception("Feed HTTP " + code);
+                if (code != 200) throw new Exception("Gold feed HTTP " + code);
                 BufferedReader reader = new BufferedReader(new InputStreamReader(connection.getInputStream(), "UTF-8"));
                 StringBuilder body = new StringBuilder();
                 String line;
                 while ((line = reader.readLine()) != null) body.append(line);
                 reader.close();
                 JSONObject json = new JSONObject(body.toString());
-                double spot = json.optDouble("spot_usd_oz", Double.NaN);
-                if (Double.isNaN(spot)) {
-                    JSONObject xau = json.optJSONObject("xau");
-                    if (xau != null) spot = xau.optDouble("price", Double.NaN);
-                }
-                if (!valid(spot)) throw new Exception("Price field missing or invalid");
-                JSONObject state = json.optJSONObject("data_state");
-                String status = state == null ? "unknown" : state.optString("status", "unknown");
-                String timestamp = json.optString("updated_at", "");
-                if (timestamp.isEmpty() && state != null) timestamp = state.optString("as_of", "");
+                double spot = json.optDouble("price", Double.NaN);
+                if (!valid(spot) || !"XAU".equalsIgnoreCase(json.optString("symbol", "")))
+                    throw new Exception("Gold feed returned missing or invalid XAU price");
+                String timestamp = json.optString("updatedAt", "");
+                if (timestamp.isEmpty()) throw new Exception("Gold feed timestamp missing");
+                boolean fresh = false;
+                try {
+                    String stamp = timestamp.length() >= 19 ? timestamp.substring(0, 19) : timestamp;
+                    SimpleDateFormat parser = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.US);
+                    parser.setTimeZone(TimeZone.getTimeZone("UTC"));
+                    Date updated = parser.parse(stamp);
+                    long age = updated == null ? Long.MAX_VALUE : System.currentTimeMillis() - updated.getTime();
+                    fresh = age >= -60000L && age <= 180000L;
+                } catch (Exception ignored) { fresh = false; }
                 final double finalSpot = spot;
-                final String finalStatus = status;
                 final String finalTimestamp = timestamp;
+                final boolean finalFresh = fresh;
                 runOnUiThread(() -> {
                     if (!activityActive) return;
-                    currentPriceInput.setText(price(finalSpot));
-                    String label = "fresh".equalsIgnoreCase(finalStatus) ? "FRESH" :
-                        ("stale".equalsIgnoreCase(finalStatus) ? "STALE — DO NOT RELY ON THIS PRICE" : "FRESHNESS UNCONFIRMED");
+                    if (finalFresh) currentPriceInput.setText(price(finalSpot));
                     livePriceView.setText("XAU/USD: $" + String.format(Locale.US, "%.2f", finalSpot) +
-                        "\nFeed status: " + label + (finalTimestamp.isEmpty() ? "" : "\nUpdated: " + finalTimestamp));
+                        "\nFeed status: " + (finalFresh ? "FRESH" : "STALE — DO NOT USE AS LIVE") +
+                        "\nUpdated: " + finalTimestamp +
+                        (finalFresh ? "" : "\nPrice field is shown for reference only; it was not copied into the signal entry."));
                 });
             } catch (Exception ex) {
                 runOnUiThread(() -> {
